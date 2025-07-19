@@ -32,7 +32,17 @@ This project performs **data cleaning**, **quality control**, and **exploratory 
 
 ## 🌐 GitHub Pages Link
 
-➡️ [Click here to view the interactive HTML report](https://beginner984.github.io/EHR-analysis/EHR.html)
+[📄 EHR.Rmd](report/EHR.Rmd)
+[📄 EHR.html](docs/index.html)
+[📄 EHR.pdf](report/EHR.pdf)
+![📊 Plot](plots/Rplot01.png)
+
+
+
+➡️ 🌐 **GitHub Pages Link**
+
+[Click here to view the interactive HTML report](https://beginner984.github.io/EHR-analysis/)
+
 
 ## 🚀 How to Run
 
