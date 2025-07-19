@@ -1,0 +1,398 @@
+---
+title: "EHR Data Quality Control and Analysis"
+author: "Fereshteh Izadi"
+date: "19 July 2025"
+output:
+  pdf_document:
+    latex_engine: xelatex
+  html_document: default
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(readr)
+
+## Load Data
+
+```{r load-path}
+# Set path to data directory
+data_path <- "C:/Users/User/Downloads/test_data/data/dest/"
+
+# Load main datasets
+```
+
+
+```{r load-data, echo=TRUE}
+patients <- read_csv(paste0(data_path, "patients.csv"),show_col_types = FALSE)
+conditions <- read_csv(paste0(data_path, "conditions.csv"),show_col_types = FALSE)
+observations <- read_csv(paste0(data_path, "observations.csv"),show_col_types = FALSE)
+medications <- read_csv(paste0(data_path, "medications.csv"),show_col_types = FALSE)
+encounters <- read_csv(paste0(data_path, "encounters.csv"),show_col_types = FALSE)
+
+# Load dictionaries
+dict_snomed <- read_csv(paste0(data_path, "dictionary_snomed.csv"),show_col_types = FALSE)
+dict_rxnorm <- read_csv(paste0(data_path, "dictionary_rxnorm.csv"),show_col_types = FALSE)
+dict_loinc  <- read_csv(paste0(data_path, "dictionary_loinc.csv"),show_col_types = FALSE)
+```
+
+## Patients Quality Control (QC)
+
+```{r patients-qc}
+# Convert date columns
+patients$BIRTHDATE <- as.Date(patients$BIRTHDATE)
+patients$DEATHDATE <- as.Date(patients$DEATHDATE)
+
+# Calculate age
+patients$AGE <- as.numeric(floor(interval(patients$BIRTHDATE, Sys.Date()) / years(1)))
+
+# Filter out invalid data
+patients <- patients %>%
+  filter(AGE >= 0 & AGE <= 100) %>%
+  filter(is.na(DEATHDATE) | BIRTHDATE <= DEATHDATE) %>%
+  filter(!(LAT == 0 & LON == 0)) %>%
+  filter(LAT >= -90 & LAT <= 90) %>%
+  filter(LON >= -180 & LON <= 180) %>%
+  filter(!(HEALTHCARE_EXPENSES == 0 & HEALTHCARE_COVERAGE > 5000)) %>%
+  filter(GENDER %in% c("M", "F", "", NA)) %>%
+  filter(!((PREFIX == "Mr." & GENDER == "F") | 
+           (PREFIX %in% c("Mrs.", "Ms.", "Miss") & GENDER == "M")))
+
+# Remove US state + UK city mismatches
+us_states <- state.abb
+uk_cities <- c("London", "Manchester", "Leeds", "Birmingham", "Glasgow", "Liverpool")
+patients <- patients[!(patients$CITY %in% uk_cities & patients$STATE %in% us_states), ]
+
+# Fix race coding
+patients$RACE[patients$RACE == "XJniDSe"] <- "other (possibly miscoded)"
+
+# ZIP formatting
+patients$ZIP <- sprintf("%05d", patients$ZIP)
+```
+
+## Encounters QC
+
+```{r encounters-qc}
+encounters$START <- as.POSIXct(encounters$START)
+encounters$STOP <- as.POSIXct(encounters$STOP)
+
+encounters <- encounters %>%
+  filter(is.na(STOP) | STOP >= START) %>%
+  filter(BASE_ENCOUNTER_COST >= 0, TOTAL_CLAIM_COST >= 0, PAYER_COVERAGE >= 0) %>%
+  filter(PATIENT %in% patients$Id)
+```
+
+## Conditions QC
+
+```{r conditions-qc}
+conditions$START <- as.Date(conditions$START)
+conditions$STOP <- as.Date(conditions$STOP)
+
+conditions <- conditions %>%
+  filter(is.na(STOP) | START <= STOP) %>%
+  filter(PATIENT %in% patients$Id) %>%
+  filter(ENCOUNTER %in% encounters$Id) %>%
+  filter(CODE %in% dict_snomed$CODE)
+
+conditions <- left_join(conditions, dict_snomed, by = "CODE")
+
+# Add 0/1 flags for socioeconomic factors based on DESCRIPTION content
+conditions <- conditions %>%
+  mutate(
+    factor_education = as.integer(grepl("education|high school|primary school|higher education", DESCRIPTION, ignore.case = TRUE)),
+    factor_employment = as.integer(grepl("employment|unemployed|labor force", DESCRIPTION, ignore.case = TRUE)),
+    factor_stress = as.integer(grepl("stress|anxiety|panic", DESCRIPTION, ignore.case = TRUE)),
+    factor_refugee = as.integer(grepl("refugee", DESCRIPTION, ignore.case = TRUE)),
+    factor_criminal = as.integer(grepl("criminal", DESCRIPTION, ignore.case = TRUE)),
+    factor_violence = as.integer(grepl("violence|abuse|victim", DESCRIPTION, ignore.case = TRUE)),
+    factor_transport = as.integer(grepl("transport", DESCRIPTION, ignore.case = TRUE)),
+    factor_drugs_alcohol = as.integer(grepl("alcohol|misuses drugs", DESCRIPTION, ignore.case = TRUE)),
+    factor_social_isolation = as.integer(grepl("social|isolation|limited contact", DESCRIPTION, ignore.case = TRUE)),
+    factor_military = as.integer(grepl("armed forces|military", DESCRIPTION, ignore.case = TRUE)),
+    factor_housing = as.integer(grepl("housing", DESCRIPTION, ignore.case = TRUE))
+  )
+
+
+```
+
+## Observations QC
+
+```{r observations-qc}
+observations$DATE <- as.POSIXct(observations$DATE)
+observations$CODE <- as.character(observations$CODE)
+dict_loinc$CODE <- as.character(dict_loinc$CODE)
+
+observations <- observations %>%
+  left_join(dict_loinc, by = "CODE") %>%
+  filter(!is.na(DESCRIPTION), !is.na(VALUE), VALUE != "", !is.na(TYPE), TYPE != "")
+
+observations$VALUE_NUMERIC <- suppressWarnings(as.numeric(observations$VALUE))
+observations <- observations[observations$TYPE != "numeric" | !is.na(observations$VALUE_NUMERIC), ]
+
+# Weight-kg mismatch
+mismatch <- grepl("weight", tolower(observations$DESCRIPTION)) & !grepl("kg", tolower(observations$UNITS))
+observations <- observations[!mismatch, ]
+
+observations <- observations %>%
+  filter(PATIENT %in% patients$Id, ENCOUNTER %in% encounters$Id)
+```
+
+## Medications QC
+
+```{r medications-qc}
+medications$START <- as.POSIXct(medications$START)
+medications$STOP <- as.POSIXct(medications$STOP)
+
+medications <- medications %>%
+  filter(is.na(STOP) | START <= STOP, PATIENT %in% patients$Id, ENCOUNTER %in% encounters$Id) %>%
+  filter(BASE_COST >= 0, PAYER_COVERAGE >= 0, TOTALCOST >= 0)
+
+medications <- medications %>%
+  left_join(dict_rxnorm, by = "CODE") %>%
+  filter(!is.na(DESCRIPTION)) %>%
+  filter(BASE_COST <= TOTALCOST) %>%
+  filter(abs((BASE_COST + PAYER_COVERAGE) - TOTALCOST) <= 1)
+```
+
+## Descriptive Summaries and Visualizations
+
+```{r summary-plots}
+# Gender distribution
+ggplot(patients, aes(x = GENDER)) + geom_bar(fill = "steelblue") + theme_minimal()
+
+# Age distribution
+ggplot(patients, aes(x = AGE)) + geom_histogram(binwidth = 5, fill = "darkorange") + theme_minimal()
+
+# Ethnicity and Race
+ggplot(patients, aes(x = ETHNICITY)) + geom_bar(fill = "purple") + coord_flip() + theme_minimal()
+ggplot(patients, aes(x = RACE)) + geom_bar(fill = "green") + coord_flip() + theme_minimal()
+```
+
+## Top Medications, Conditions, and Labs
+
+```{r top-summary}
+top_meds <- medications %>%
+  group_by(PATIENT, DESCRIPTION) %>% summarise(n = n()) %>%
+  group_by(DESCRIPTION) %>% summarise(total = sum(n)) %>% arrange(desc(total)) %>% head(10)
+
+conditions_summary <- conditions %>%
+  group_by(DESCRIPTION) %>% summarise(n = n()) %>% arrange(desc(n))
+top_conditions <- head(conditions_summary, 10)
+least_conditions <- tail(conditions_summary, 10)
+
+top_labs <- observations %>%
+  group_by(DESCRIPTION) %>% summarise(n = n()) %>% arrange(desc(n)) %>% head(10)
+```
+
+## Medications by Socioeconomic Group
+
+### Medications for Unemployed Patients
+
+```{r unemployed_meds}
+
+# Step 1: Find encounters where unemployment is recorded
+unemployed_encounters <- conditions %>%
+  filter(grepl("unemployed|not in labor force", DESCRIPTION, ignore.case = TRUE)) %>%
+  distinct(PATIENT, ENCOUNTER)
+
+# Step 2: Join to medications
+medications_unemployed <- medications %>%
+  semi_join(unemployed_encounters, by = c("PATIENT", "ENCOUNTER"))
+
+# Step 3: Plot top medications
+medications_unemployed %>%
+  count(DESCRIPTION, sort = TRUE) %>%
+  slice_max(n, n = 10) %>%
+  ggplot(aes(x = reorder(DESCRIPTION, n), y = n)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(
+    title = "Top Medications Among Unemployed Patients",
+    x = "Medication", y = "Count"
+  ) +
+  theme_minimal()
+```
+
+
+
+
+## Conditions with Highest Out-of-Pocket Costs
+
+```{r cost-analysis}
+cond_cost <- merge(conditions, encounters[, c("Id", "TOTAL_CLAIM_COST", "PAYER_COVERAGE")],
+                   by.x = "ENCOUNTER", by.y = "Id") %>%
+  group_by(DESCRIPTION) %>%
+  summarise(
+    avg_claim_cost = mean(TOTAL_CLAIM_COST, na.rm = TRUE),
+    avg_patient_pay = mean(TOTAL_CLAIM_COST - PAYER_COVERAGE, na.rm = TRUE)) %>%
+  arrange(desc(avg_patient_pay))
+```
+
+## Reasons for Visit
+
+```{r reasons}
+reasons <- encounters %>%
+  filter(!is.na(REASONCODE)) %>%
+  count(REASONCODE, sort = TRUE) %>%
+  left_join(dict_snomed, by = c("REASONCODE" = "CODE")) %>%
+  rename(ReasonDescription = DESCRIPTION)
+head(reasons, 20)
+```
+
+## Done
+
+```{r final-checks}
+summary(patients)
+summary(encounters)
+summary(medications)
+summary(conditions)
+summary(observations)
+```
+
+## Exploring and comparing the distribution of: systolic and diastolic blood pressure and BMI measurements in patients with diagnosed hypertension
+
+
+
+```{r hypertension_bp_bmi, echo=TRUE, message=FALSE, warning=FALSE}
+
+# 1. Get hypertensive patients
+hypertensive_patients <- conditions %>%
+  filter(grepl("hypertension", DESCRIPTION, ignore.case = TRUE)) %>%
+  distinct(PATIENT)
+
+# 2. Extract their blood pressure and BMI observations
+bp_bmi_data <- observations %>%
+  semi_join(hypertensive_patients, by = "PATIENT") %>%
+  filter(CODE %in% c("55284-4", "8480-6", "8462-4", "39156-5")) %>%  # systolic, diastolic, BMI
+  mutate(
+    Type = case_when(
+      CODE == "8480-6" ~ "Systolic BP",
+      CODE == "8462-4" ~ "Diastolic BP",
+      CODE == "39156-5" ~ "BMI",
+      CODE == "55284-4" ~ "Blood Pressure Panel",
+      TRUE ~ "Other"
+    ),
+    VALUE = as.numeric(VALUE)
+  ) %>%
+  filter(!is.na(VALUE))  # remove any non-numeric or NA values
+
+# 3. Plot distributions
+bp_bmi_data %>%
+  filter(Type %in% c("Systolic BP", "Diastolic BP", "BMI")) %>%
+  ggplot(aes(x = VALUE, fill = Type)) +
+  geom_density(alpha = 0.6) +
+  facet_wrap(~Type, scales = "free") +
+  labs(
+    title = "Distribution of Systolic/Diastolic BP and BMI in Hypertensive Patients",
+    x = "Measurement Value",
+    y = "Density"
+  ) +
+  theme_minimal()
+```
+
+## The crude, and adjusted (to the UK population as much as possible) prevalence of hypertension
+
+
+
+```{r hypertension_prevalence, message=FALSE, warning=FALSE}
+# Step 1: Identify hypertension codes from SNOMED dictionary
+htn_codes <- dict_snomed %>%
+  filter(grepl("hypertension", tolower(DESCRIPTION))) %>%
+  pull(CODE)
+
+# Step 2: Mark hypertensive patients
+htn_patients <- conditions %>%
+  filter(CODE %in% htn_codes) %>%
+  distinct(PATIENT)
+
+# Step 3: Mark all patients as hypertensive or not
+patients <- patients %>%
+  mutate(HYPERTENSION = ifelse(Id %in% htn_patients$PATIENT, 1, 0))
+
+# Step 4: Crude prevalence
+crude_prev <- mean(patients$HYPERTENSION) * 100
+cat("Crude Prevalence of Hypertension: ", round(crude_prev, 2), "%\n")
+
+# Step 5: Calculate age
+library(lubridate)
+patients <- patients %>%
+  mutate(BIRTHDATE = as.Date(BIRTHDATE),
+         AGE = as.numeric(floor(interval(BIRTHDATE, Sys.Date()) / years(1))))
+
+# Step 6: Define UK population weights (example)
+uk_weights <- data.frame(
+  age_group = c("0-24", "25-44", "45-64", "65+"),
+  proportion = c(0.29, 0.26, 0.26, 0.19)  # approximate UK structure
+)
+
+# Step 7: Categorize age
+patients <- patients %>%
+  mutate(age_group = case_when(
+    AGE < 25 ~ "0-24",
+    AGE < 45 ~ "25-44",
+    AGE < 65 ~ "45-64",
+    TRUE ~ "65+"
+  ))
+
+# Step 8: Group prevalence by age
+age_prevalence <- patients %>%
+  group_by(age_group) %>%
+  summarise(group_prev = mean(HYPERTENSION), .groups = "drop") %>%
+  left_join(uk_weights, by = "age_group") %>%
+  mutate(weighted = group_prev * proportion)
+
+# Step 9: Adjusted prevalence
+adjusted_prev <- sum(age_prevalence$weighted) * 100
+cat("Age-Adjusted Prevalence of Hypertension (UK population): ", round(adjusted_prev, 2), "%\n")
+```
+
+
+##  Further Analysis: Stratified Summary and Plots
+
+```{r bp-bmi-summary}
+bp_bmi_summary <- bp_bmi_data %>%
+  group_by(Type) %>%
+  summarise(
+    count = n(),
+    mean = round(mean(VALUE_NUMERIC, na.rm = TRUE), 1),
+    median = round(median(VALUE_NUMERIC, na.rm = TRUE), 1),
+    sd = round(sd(VALUE_NUMERIC, na.rm = TRUE), 1),
+    .groups = 'drop'
+  )
+
+bp_bmi_summary
+```
+
+```{r Boxplots by sex}
+bp_bmi_data <- bp_bmi_data %>%
+  left_join(patients %>% select(Id, GENDER), by = c("PATIENT" = "Id"))
+
+ggplot(bp_bmi_data, aes(x = Type, y = VALUE_NUMERIC, fill = GENDER)) +
+  geom_boxplot(outlier.alpha = 0.2) +
+  labs(
+    title = "Blood Pressure and BMI by Gender in Hypertensive Patients",
+    x = "Measurement Type", y = "Value"
+  ) +
+  theme_minimal()
+```
+
+```{r Boxplots by age group}
+bp_bmi_data <- bp_bmi_data %>%
+  left_join(patients %>% select(Id, AGE), by = c("PATIENT" = "Id")) %>%
+  mutate(AgeGroup = cut(
+    AGE,
+    breaks = c(0, 30, 50, 70, 120),
+    labels = c("≤30", "31–50", "51–70", "70+")
+  ))
+
+ggplot(bp_bmi_data, aes(x = Type, y = VALUE_NUMERIC, fill = AgeGroup)) +
+  geom_boxplot(outlier.alpha = 0.2) +
+  labs(
+    title = "BP and BMI by Age Group in Hypertensive Patients",
+    x = "Measurement Type", y = "Value"
+  ) +
+  theme_minimal()
+```
