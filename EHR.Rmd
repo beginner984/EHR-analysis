@@ -49,17 +49,36 @@ patients$DEATHDATE <- as.Date(patients$DEATHDATE)
 # Calculate age
 patients$AGE <- as.numeric(floor(interval(patients$BIRTHDATE, Sys.Date()) / years(1)))
 
+# HEALTHCARE_EXPENSES vs HEALTHCARE_COVERAGE Scatter plot with log scales
+ggplot(patients, aes(x = HEALTHCARE_COVERAGE, y = HEALTHCARE_EXPENSES)) +
+  geom_point(alpha = 0.6, color = "steelblue") +
+  scale_x_log10() +
+  scale_y_log10() +
+  labs(
+    title = "Healthcare Expenses vs Coverage",
+    x = "Healthcare Coverage (log scale)",
+    y = "Healthcare Expenses (log scale)"
+  ) +
+  theme_minimal()
+
 # Filter out invalid data
 patients <- patients %>%
-  filter(AGE >= 0 & AGE <= 100) %>%
-  filter(is.na(DEATHDATE) | BIRTHDATE <= DEATHDATE) %>%
-  filter(!(LAT == 0 & LON == 0)) %>%
-  filter(LAT >= -90 & LAT <= 90) %>%
-  filter(LON >= -180 & LON <= 180) %>%
-  filter(!(HEALTHCARE_EXPENSES == 0 & HEALTHCARE_COVERAGE > 5000)) %>%
-  filter(GENDER %in% c("M", "F", "", NA)) %>%
-  filter(!((PREFIX == "Mr." & GENDER == "F") | 
-           (PREFIX %in% c("Mrs.", "Ms.", "Miss") & GENDER == "M")))
+  mutate(
+    # Logical flags for invalid healthcare expense/coverage
+    FLAG_INVALID_EXPENSE = HEALTHCARE_EXPENSES < 500 | HEALTHCARE_EXPENSES > 2e7,
+    FLAG_INVALID_COVERAGE = HEALTHCARE_COVERAGE > HEALTHCARE_EXPENSES
+  ) %>%
+  filter(
+    AGE >= 0 & AGE <= 100,
+    is.na(DEATHDATE) | BIRTHDATE <= DEATHDATE,
+    !(LAT == 0 & LON == 0),
+    LAT >= -90 & LAT <= 90,
+    LON >= -180 & LON <= 180,
+    !(HEALTHCARE_EXPENSES == 0 & HEALTHCARE_COVERAGE > 1000),
+    GENDER %in% c("M", "F", "", NA),
+    !((PREFIX == "Mr." & GENDER == "F") | 
+      (PREFIX %in% c("Mrs.", "Ms.", "Miss") & GENDER == "M"))
+  )
 
 # Remove US state + UK city mismatches
 us_states <- state.abb
@@ -71,14 +90,19 @@ patients$RACE[patients$RACE == "XJniDSe"] <- "other (possibly miscoded)"
 
 # ZIP formatting
 patients$ZIP <- sprintf("%05d", patients$ZIP)
+
+# The number of patients and unique patients after QC
+print(dim(patients))
+print(n_distinct(patients$Id))
 ```
 
 ## Encounters QC
 
 ```{r encounters-qc}
+# Convert date columns
 encounters$START <- as.POSIXct(encounters$START)
 encounters$STOP <- as.POSIXct(encounters$STOP)
-
+# Filter out invalid data
 encounters <- encounters %>%
   filter(is.na(STOP) | STOP >= START) %>%
   filter(BASE_ENCOUNTER_COST >= 0, TOTAL_CLAIM_COST >= 0, PAYER_COVERAGE >= 0) %>%
@@ -88,9 +112,11 @@ encounters <- encounters %>%
 ## Conditions QC
 
 ```{r conditions-qc}
+# Convert date columns
 conditions$START <- as.Date(conditions$START)
 conditions$STOP <- as.Date(conditions$STOP)
 
+# Filter out invalid data
 conditions <- conditions %>%
   filter(is.na(STOP) | START <= STOP) %>%
   filter(PATIENT %in% patients$Id) %>%
@@ -121,10 +147,13 @@ conditions <- conditions %>%
 ## Observations QC
 
 ```{r observations-qc}
+# Convert date columns
 observations$DATE <- as.POSIXct(observations$DATE)
 observations$CODE <- as.character(observations$CODE)
+
 dict_loinc$CODE <- as.character(dict_loinc$CODE)
 
+# Filter out invalid data
 observations <- observations %>%
   left_join(dict_loinc, by = "CODE") %>%
   filter(!is.na(DESCRIPTION), !is.na(VALUE), VALUE != "", !is.na(TYPE), TYPE != "")
@@ -138,11 +167,21 @@ observations <- observations[!mismatch, ]
 
 observations <- observations %>%
   filter(PATIENT %in% patients$Id, ENCOUNTER %in% encounters$Id)
+
+
+# Join observations with patients to get DEATHDATE
+observations <- observations %>%
+  left_join(patients %>% select(Id, DEATHDATE), by = c("PATIENT" = "Id"))
+
+# Keep only observations that occurred before or on the DEATHDATE, or if DEATHDATE is missing
+observations <- observations %>%
+  filter(is.na(DEATHDATE) | DATE <= DEATHDATE)
 ```
 
 ## Medications QC
 
 ```{r medications-qc}
+# Convert date columns
 medications$START <- as.POSIXct(medications$START)
 medications$STOP <- as.POSIXct(medications$STOP)
 
@@ -155,6 +194,15 @@ medications <- medications %>%
   filter(!is.na(DESCRIPTION)) %>%
   filter(BASE_COST <= TOTALCOST) %>%
   filter(abs((BASE_COST + PAYER_COVERAGE) - TOTALCOST) <= 1)
+
+
+# Join medications with patients to get DEATHDATE
+medications <- medications %>%
+  left_join(patients %>% select(Id, DEATHDATE), by = c("PATIENT" = "Id"))
+
+# Filter out medications that start after the patient's death
+medications <- medications %>%
+  filter(is.na(DEATHDATE) | START <= DEATHDATE)
 ```
 
 ## Descriptive Summaries and Visualizations
@@ -177,14 +225,19 @@ ggplot(patients, aes(x = RACE)) + geom_bar(fill = "green") + coord_flip() + them
 top_meds <- medications %>%
   group_by(PATIENT, DESCRIPTION) %>% summarise(n = n()) %>%
   group_by(DESCRIPTION) %>% summarise(total = sum(n)) %>% arrange(desc(total)) %>% head(10)
+print(top_meds)
 
 conditions_summary <- conditions %>%
   group_by(DESCRIPTION) %>% summarise(n = n()) %>% arrange(desc(n))
 top_conditions <- head(conditions_summary, 10)
 least_conditions <- tail(conditions_summary, 10)
 
+print(top_conditions)
+print(least_conditions)
+
 top_labs <- observations %>%
   group_by(DESCRIPTION) %>% summarise(n = n()) %>% arrange(desc(n)) %>% head(10)
+print(top_labs)
 ```
 
 ## Medications by Socioeconomic Group
@@ -239,10 +292,10 @@ reasons <- encounters %>%
   count(REASONCODE, sort = TRUE) %>%
   left_join(dict_snomed, by = c("REASONCODE" = "CODE")) %>%
   rename(ReasonDescription = DESCRIPTION)
-head(reasons, 20)
+print(head(reasons, 20))
 ```
 
-## Done
+## Summaries
 
 ```{r final-checks}
 summary(patients)
@@ -316,37 +369,58 @@ patients <- patients %>%
 crude_prev <- mean(patients$HYPERTENSION) * 100
 cat("Crude Prevalence of Hypertension: ", round(crude_prev, 2), "%\n")
 
-# Step 5: Calculate age
+library(dplyr)
 library(lubridate)
+library(ggplot2)
+library(tidyr)
+
+# Step 1: Age and age group
 patients <- patients %>%
   mutate(BIRTHDATE = as.Date(BIRTHDATE),
-         AGE = as.numeric(floor(interval(BIRTHDATE, Sys.Date()) / years(1))))
+         AGE = as.numeric(floor(interval(BIRTHDATE, Sys.Date()) / years(1))),
+         age_group = case_when(
+           AGE < 45 ~ "16-44",
+           AGE < 65 ~ "45-64",
+           TRUE ~ "65+"
+         ))
 
-# Step 6: Define UK population weights (example)
-uk_weights <- data.frame(
-  age_group = c("0-24", "25-44", "45-64", "65+"),
-  proportion = c(0.29, 0.26, 0.26, 0.19)  # approximate UK structure
+# Step 2: UK HSE 2021 reference prevalence (from Table 12)
+hse_prevalence <- tribble(
+  ~age_group, ~GENDER, ~hse_prev,
+  "16-44", "M", 0.11,
+  "45-64", "M", 0.39,
+  "65+",   "M", 0.59,
+  "16-44", "F", 0.08,
+  "45-64", "F", 0.32,
+  "65+",   "F", 0.60
 )
 
-# Step 7: Categorize age
-patients <- patients %>%
-  mutate(age_group = case_when(
-    AGE < 25 ~ "0-24",
-    AGE < 45 ~ "25-44",
-    AGE < 65 ~ "45-64",
-    TRUE ~ "65+"
-  ))
+# Step 3: Synthea cohort's prevalence by age group and gender
+cohort_prev <- patients %>%
+  filter(GENDER %in% c("M", "F")) %>%
+  group_by(age_group, GENDER) %>%
+  summarise(cohort_prev = mean(HYPERTENSION), n = n(), .groups = "drop")
 
-# Step 8: Group prevalence by age
-age_prevalence <- patients %>%
-  group_by(age_group) %>%
-  summarise(group_prev = mean(HYPERTENSION), .groups = "drop") %>%
-  left_join(uk_weights, by = "age_group") %>%
-  mutate(weighted = group_prev * proportion)
+# Step 4: Join for comparison
+comparison <- left_join(cohort_prev, hse_prevalence, by = c("age_group", "GENDER"))
 
-# Step 9: Adjusted prevalence
-adjusted_prev <- sum(age_prevalence$weighted) * 100
-cat("Age-Adjusted Prevalence of Hypertension (UK population): ", round(adjusted_prev, 2), "%\n")
+# View comparison table
+print(comparison)
+
+# Step 5: Reshape for plotting
+plot_data <- comparison %>%
+  pivot_longer(cols = c("cohort_prev", "hse_prev"),
+               names_to = "source", values_to = "prevalence")
+
+# Step 6: Plot
+ggplot(plot_data, aes(x = age_group, y = prevalence * 100, fill = source)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~GENDER) +
+  scale_fill_manual(values = c("cohort_prev" = "steelblue", "hse_prev" = "darkred"),
+                    labels = c("Synthea Data", "HSE 2021")) +
+  labs(title = "Hypertension Prevalence: Synthea Cohort vs HSE 2021",
+       x = "Age Group", y = "Prevalence (%)", fill = "Source") +
+  theme_minimal(base_size = 14)
 ```
 
 
