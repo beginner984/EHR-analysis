@@ -26,23 +26,6 @@ This project performs **data cleaning**, **quality control**, and **exploratory 
 - Top conditions, labs, and medications
 - Socioeconomic indicators like **employment**, **housing**, **substance use**, and their relation to medication usage
 
-## 📷 Example Output
-
-![Sample plot](Rplot04.png)
-
-## 🌐 GitHub Pages Link
-
-[📄 EHR.Rmd](report/EHR.Rmd)
-[📄 EHR.html](docs/index.html)
-[📄 EHR.pdf](report/EHR.pdf)
-![📊 Plot](plots/Rplot01.png)
-
-
-
-➡️ 🌐 **GitHub Pages Link**
-
-[Click here to view the interactive HTML report](https://beginner984.github.io/EHR-analysis/)
-
 
 ## 🚀 How to Run
 
