@@ -26,6 +26,11 @@ This project performs **data cleaning**, **quality control**, and **exploratory 
 - Top conditions, labs, and medications
 - Socioeconomic indicators like **employment**, **housing**, **substance use**, and their relation to medication usage
 
+## 🌐 View the Interactive Report
+
+👉 [Click here to view the interactive HTML report](https://beginner984.github.io/EHR-analysis/EHR.html)
+
+
 
 ## 🚀 How to Run
 
