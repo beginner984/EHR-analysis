@@ -28,7 +28,7 @@ This project performs **data cleaning**, **quality control**, and **exploratory 
 
 ## 🌐 View the Interactive Report
 
-👉 [Click here to view the interactive HTML report](https://beginner984.github.io/EHR-analysis/EHR.html)
+👉 [Click here to view the interactive HTML report](https://beginner984.github.io/EHR-analysis/)
 
 
 
